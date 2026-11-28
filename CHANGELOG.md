@@ -4,6 +4,13 @@ All notable changes to this project are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- Gas: a value of the current month (a self-reading, for example) was spread over all the days of the month, future
+  days included. The current month is now spread only once it is over; until then only its real days before today
+  are used.
+
 ## [0.6.0] - 2026-11-26
 
 ### Added

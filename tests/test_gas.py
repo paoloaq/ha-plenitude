@@ -152,7 +152,10 @@ def test_read_months_trims_the_months_without_a_reading() -> None:
 
 
 def test_series_spreads_the_month_and_prefers_real_days() -> None:
-    series = gas_series({(2026, 10): 31.0, (2026, 11): 30.0}, {date(2026, 11, 1): 6.0, date(2026, 11, 2): 0.0})
+    december = date(2026, 12, 3)
+    series = gas_series(
+        {(2026, 10): 31.0, (2026, 11): 30.0}, {date(2026, 11, 1): 6.0, date(2026, 11, 2): 0.0}, december
+    )
     october = [v for d, v in series.items() if d.month == 10]
     assert len(october) == 31 and all(v == pytest.approx(1.0) for v in october)
     # November: the real days, the rest of the month (24) over the other 28 days.
@@ -160,7 +163,23 @@ def test_series_spreads_the_month_and_prefers_real_days() -> None:
     assert series[date(2026, 11, 3)] == pytest.approx(24 / 28)
     assert sum(v for d, v in series.items() if d.month == 11) == pytest.approx(30.0)
     # Days without a monthly value yet: only the days.
-    assert gas_series({}, {date(2026, 12, 1): 2.0}) == {date(2026, 12, 1): 2.0}
+    assert gas_series({}, {date(2026, 12, 1): 2.0}, december) == {date(2026, 12, 1): 2.0}
+
+
+def test_series_skips_the_current_month_until_it_is_closed() -> None:
+    """A value of the current month (a self-reading) covers the days up to the reading: it is not spread, and no
+    row is written in the future."""
+    today = date(2026, 11, 15)
+    months = {(2026, 10): 31.0, (2026, 11): 15.0}
+    series = gas_series(months, {}, today)
+    assert max(series) == date(2026, 10, 31) and sum(series.values()) == pytest.approx(31.0)
+    # Real days of the current month stay, but only those before today.
+    days = {date(2026, 11, 1): 2.0, date(2026, 11, 14): 1.0, date(2026, 11, 15): 9.0}
+    series = gas_series(months, days, today)
+    assert {d: v for d, v in series.items() if d.month == 11} == {date(2026, 11, 1): 2.0, date(2026, 11, 14): 1.0}
+    # Once the month is over, it is spread as any other.
+    series = gas_series(months, {}, date(2026, 12, 1))
+    assert max(series) == date(2026, 11, 30) and sum(series.values()) == pytest.approx(46.0)
 
 
 @dataclass
@@ -267,6 +286,27 @@ async def test_gas_statistics_and_sensors(recorder_mock, hass: HomeAssistant, fr
     for row in volume:
         total += row["state"]
         assert row["sum"] == pytest.approx(total, abs=1e-6)
+
+
+async def test_self_reading_of_the_current_month(
+    recorder_mock, hass: HomeAssistant, freezer, gas_portal: GasPortal
+) -> None:
+    freezer.move_to(datetime(2026, 11, 26, 12, tzinfo=ROME))
+    gas_portal.months = {(2026, 10): 31.0, (2026, 11): 15.0}  # November: a self-reading before the month ends
+    entry = await setup_gas(hass, {PRICE_MODE: "none"})
+    volume = await rows(hass, VOLUME)
+    assert len(volume) == 31 and volume[-1]["sum"] == pytest.approx(31.0)  # October only, nothing in the future
+    assert volume[-1]["start"] == datetime(2026, 10, 31, tzinfo=ROME).timestamp()
+    assert gas_sensor(hass, "ultimo_mese").state == "2026-10-01"
+
+    # The month is over and read: November is spread over its 30 days, the sums continue.
+    gas_portal.months[(2026, 11)] = 30.0
+    freezer.move_to(datetime(2026, 12, 3, 12, tzinfo=ROME))
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    volume = await rows(hass, VOLUME)
+    assert len(volume) == 61 and volume[-1]["sum"] == pytest.approx(61.0)
+    assert gas_sensor(hass, "ultimo_mese").state == "2026-11-01"
 
 
 async def test_gas_without_data(recorder_mock, hass: HomeAssistant, freezer, gas_portal: GasPortal) -> None:

@@ -90,13 +90,19 @@ def read_months(months: Mapping[Month, float]) -> dict[Month, float]:
     return {month: months.get(month, 0.0) for month in _month_range(used[0], used[-1])}
 
 
-def gas_series(months: Mapping[Month, float], days: Mapping[date, float]) -> dict[date, float]:
+def gas_series(months: Mapping[Month, float], days: Mapping[date, float], today: date) -> dict[date, float]:
     """Consumption per day: the days given by the customer area; for a month without them, its value spread evenly.
 
     A month with some days only: the rest of its value, if any, is spread over the days without a value.
+
+    Only the months closed before ``today`` are spread: a value of the current month (a self-reading, for example)
+    covers the days up to the reading, not the whole month, and spreading it would write rows in the future. The
+    month is spread when it is read after its end; until then only its real days before ``today`` are used.
     """
     series: dict[date, float] = {}
-    read = read_months(months)
+    current = (today.year, today.month)
+    read = read_months({month: value for month, value in months.items() if month < current})
+    days = {day: value for day, value in days.items() if day < today}
     for month in sorted(set(read) | {(day.year, day.month) for day in days}):
         month_days = _month_days(month)
         real = {day: days[day] for day in month_days if day in days}
@@ -181,7 +187,7 @@ class GasCoordinator(PlenitudeCoordinator):
         if not first_import:
             # New prices or costs: rewritten from the stored values at once, before asking the customer area, which
             # may not answer (as for electricity since 0.5.1). Nothing is written when nothing changed.
-            await self._write(gas_series(months, days))
+            await self._write(gas_series(months, days, today))
         await self._ensure_supply(today)
 
         if first_import:
@@ -219,7 +225,7 @@ class GasCoordinator(PlenitudeCoordinator):
 
         self._state["gas_months"] = {_month_key(m): v for m, v in sorted(months.items())}
         self._state["gas_days"] = {d.isoformat(): v for d, v in sorted(days.items())}
-        series = gas_series(months, days)
+        series = gas_series(months, days, today)
         await self._write(series)
         self._state["gaps_checked"] = today.isoformat()
         await self._save()
@@ -282,4 +288,5 @@ class GasCoordinator(PlenitudeCoordinator):
         )
 
     async def _summary(self) -> PlenitudeData:
-        return self._gas_summary(gas_series(self._stored_months(), self._stored_days()))
+        today = dt_util.now(ROME).date()
+        return self._gas_summary(gas_series(self._stored_months(), self._stored_days(), today))
